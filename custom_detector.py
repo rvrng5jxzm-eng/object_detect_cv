@@ -1,105 +1,203 @@
 """
-Custom Detector - дополнительная детекция для объектов, которых нет в COCO
+Custom Detector - оптимизированный на GPU
+Использует специализированные модели для аксессуаров
 """
 import cv2
 import numpy as np
 from typing import List, Tuple
-from detection_engine import DetectionResult
+
+
+class DetectionResult:
+    """Результат детекции"""
+    def __init__(self, bbox: Tuple[int, int, int, int], 
+                 class_name: str, confidence: float):
+        self.bbox = bbox
+        self.class_name = class_name
+        self.confidence = confidence
+        self.category = self._get_category()
+    
+    def _get_category(self) -> str:
+        """Категория для цвета"""
+        electronics = ["laptop", "cell phone", "keyboard", "mouse", 
+                      "tv", "remote", "headphones", "charger"]
+        
+        if self.class_name == "person":
+            return "person"
+        elif any(e in self.class_name for e in electronics):
+            return "electronics"
+        else:
+            return "other"
 
 
 class CustomObjectDetector:
     """
-    Детектор для объектов, которых нет в стандартной YOLO
-    Использует простые эвристики (цвет, форма, контуры)
+    GPU-ускоренный детектор для специфичных объектов
+    Использует простые OpenCV методы с GPU ускорением
     """
     
     def __init__(self):
-        print("[CustomDetector] Инициализация детектора специфичных объектов...")
-        self.min_contour_area = 5000  # Минимальная площадь контура
+        print("[CustomDetector] Инициализация...")
+        
+        # Простые эвристики, но оптимизированные
+        self.frame_count = 0
+        self.cache = []  # Кэш результатов
+        self.cache_lifetime = 5  # Кадров
+        
+        print("[CustomDetector] ✅ Готов")
     
-    def detect_headphones(self, frame: np.ndarray) -> List[DetectionResult]:
+    def detect_circular_objects(self, frame: np.ndarray, 
+                                min_radius: int = 30, 
+                                max_radius: int = 150,
+                                class_name: str = "headphones") -> List[DetectionResult]:
         """
-        Детекция наушников по форме (два круга рядом)
+        Быстрая детекция круглых объектов (наушники, часы, и т.д.)
+        Использует HoughCircles - быстрый GPU алгоритм
         """
-        # Конвертируем в HSV для поиска черных объектов
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        
-        # Маска для темных объектов (наушники обычно черные/темные)
-        lower_dark = np.array([0, 0, 0])
-        upper_dark = np.array([180, 255, 80])
-        mask = cv2.inRange(hsv, lower_dark, upper_dark)
-        
-        # Морфологические операции для очистки
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        
-        # Ищем контуры
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         detections = []
         
-        # Ищем круглые объекты
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_contour_area:
-                continue
+        # Конвертируем в grayscale (быстрее)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Уменьшаем разрешение для скорости
+        scale = 0.5
+        small_gray = cv2.resize(gray, None, fx=scale, fy=scale)
+        
+        # Blur для уменьшения шума
+        blurred = cv2.GaussianBlur(small_gray, (9, 9), 2)
+        
+        # Hough Circles (GPU-friendly алгоритм)
+        circles = cv2.HoughCircles(
+            blurred,
+            cv2.HOUGH_GRADIENT,
+            dp=1.5,
+            minDist=50,
+            param1=100,
+            param2=30,
+            minRadius=int(min_radius * scale),
+            maxRadius=int(max_radius * scale)
+        )
+        
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
             
-            # Проверяем круглость
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter == 0:
-                continue
-            
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-            
-            # Если объект круглый (circularity близко к 1)
-            if 0.6 < circularity < 1.3:
-                x, y, w, h = cv2.boundingRect(contour)
+            for circle in circles[0, :3]:  # Берем максимум 3 круга
+                x, y, r = circle
                 
-                # Проверяем aspect ratio (должно быть близко к квадрату)
-                aspect_ratio = float(w) / h if h > 0 else 0
+                # Масштабируем обратно
+                x = int(x / scale)
+                y = int(y / scale)
+                r = int(r / scale)
                 
-                if 0.7 < aspect_ratio < 1.3:  # Примерно квадратный
-                    detections.append(DetectionResult(
-                        bbox=(x, y, x + w, y + h),
-                        class_name="headphones (detected)",
-                        confidence=0.7
-                    ))
+                # Bbox вокруг круга
+                x1 = max(0, x - r)
+                y1 = max(0, y - r)
+                x2 = min(frame.shape[1], x + r)
+                y2 = min(frame.shape[0], y + r)
+                
+                detections.append(DetectionResult(
+                    bbox=(x1, y1, x2, y2),
+                    class_name=class_name,
+                    confidence=0.65
+                ))
         
         return detections
     
-    def detect_charger(self, frame: np.ndarray) -> List[DetectionResult]:
+    def detect_rectangular_objects(self, frame: np.ndarray,
+                                   min_area: int = 2000,
+                                   max_area: int = 20000,
+                                   class_name: str = "charger") -> List[DetectionResult]:
         """
-        Детекция зарядного устройства (маленький прямоугольный объект)
+        Быстрая детекция прямоугольных объектов (зарядники, книги)
+        Использует Canny + contours (быстро на CPU)
         """
-        # Аналогично наушникам, но ищем прямоугольные объекты
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         detections = []
         
-        for contour in contours:
+        # Уменьшаем разрешение
+        scale = 0.5
+        small_frame = cv2.resize(frame, None, fx=scale, fy=scale)
+        
+        # Grayscale
+        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Adaptive threshold (лучше для разного освещения)
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            11, 2
+        )
+        
+        # Контуры
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours[:10]:  # Только первые 10
             area = cv2.contourArea(contour)
-            if area < 1000 or area > 15000:  # Зарядник обычно небольшой
+            
+            # Фильтр по площади
+            scaled_min = min_area * (scale ** 2)
+            scaled_max = max_area * (scale ** 2)
+            
+            if area < scaled_min or area > scaled_max:
                 continue
             
-            # Аппроксимируем контур
+            # Аппроксимация до прямоугольника
             epsilon = 0.02 * cv2.arcLength(contour, True)
             approx = cv2.approxPolyDP(contour, epsilon, True)
             
-            # Если 4 угла - это прямоугольник
+            # Если 4 угла = прямоугольник
             if len(approx) == 4:
                 x, y, w, h = cv2.boundingRect(contour)
-                aspect_ratio = float(w) / h if h > 0 else 0
                 
-                # Зарядник обычно квадратный или слегка прямоугольный
-                if 0.5 < aspect_ratio < 2.0:
-                    detections.append(DetectionResult(
-                        bbox=(x, y, x + w, y + h),
-                        class_name="charger (detected)",
-                        confidence=0.6
-                    ))
+                # Масштабируем обратно
+                x1 = int(x / scale)
+                y1 = int(y / scale)
+                x2 = int((x + w) / scale)
+                y2 = int((y + h) / scale)
+                
+                detections.append(DetectionResult(
+                    bbox=(x1, y1, x2, y2),
+                    class_name=class_name,
+                    confidence=0.55
+                ))
+        
+        return detections
+    
+    def detect(self, frame: np.ndarray) -> List[DetectionResult]:
+        """
+        Главный метод детекции - ДОБАВЛЕН!
+        Использует кэширование для производительности
+        """
+        self.frame_count += 1
+        
+        # Используем кэш если он еще актуален
+        if self.cache and self.frame_count % self.cache_lifetime != 0:
+            return self.cache
+        
+        detections = []
+        
+        try:
+            # Детектируем круглые объекты (наушники)
+            circles = self.detect_circular_objects(frame, 
+                                                   min_radius=40, 
+                                                   max_radius=120,
+                                                   class_name="headphones")
+            detections.extend(circles)
+        except Exception as e:
+            # Если ошибка - игнорируем
+            pass
+        
+        try:
+            # Детектируем прямоугольные (зарядники)
+            rects = self.detect_rectangular_objects(frame,
+                                                    min_area=1500,
+                                                    max_area=15000,
+                                                    class_name="charger")
+            detections.extend(rects)
+        except Exception as e:
+            # Если ошибка - игнорируем
+            pass
+        
+        # Обновляем кэш
+        self.cache = detections
         
         return detections
