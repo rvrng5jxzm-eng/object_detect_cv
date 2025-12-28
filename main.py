@@ -1,5 +1,5 @@
 """
-Main Application - Real-time CV Detection
+Main Application - Real-time Object Detection (БЕЗ face analysis)
 """
 import pygame
 import time
@@ -13,12 +13,12 @@ from ui_renderer import UIRenderer
 
 class CVDetectionApp:
     """
-    Главное приложение для real-time детекции
+    Главное приложение для real-time детекции объектов
     """
     
     def __init__(self):
         print("=" * 70)
-        print("🎥 Real-time Object & Face Detection")
+        print("🎥 Real-time Object Detection")
         print("=" * 70)
         Config.print_summary()
         
@@ -48,7 +48,6 @@ class CVDetectionApp:
         self.running = True
         self.paused = False
         self.show_stats = True
-        self.enable_face_analysis = True
         
         # === Timing ===
         self.clock = pygame.time.Clock()
@@ -58,7 +57,6 @@ class CVDetectionApp:
         
         # === Detection results ===
         self.current_objects = []
-        self.current_faces = []
         
         print("\n" + "=" * 70)
         print("✅ Инициализация завершена!")
@@ -67,11 +65,11 @@ class CVDetectionApp:
         print("  SPACE - Пауза")
         print("  D     - Статистика вкл/выкл")
         print("  ESC   - Выход")
-        print("\n👋 Покажите лицо или объекты перед камерой!\n")
+        print("\n🎯 Покажите объекты перед камерой!\n")
     
     def process_frame(self):
         """
-        Обрабатываем кадр: детекция + UI
+        Обрабатываем кадр: детекция объектов
         """
         # Читаем кадр с камеры
         if not self.camera.read_frame():
@@ -81,17 +79,10 @@ class CVDetectionApp:
         
         # Детекция (если не на паузе)
         if not self.paused:
-            # Только объекты
             self.current_objects = self.detector.detect_objects(frame)
-            
-            # Face analysis опционально
-            if self.enable_face_analysis:
-                _, self.current_faces = self.detector.process_frame(frame)
-            else:
-                self.current_faces = []
         
         # Обновляем статистику
-        self.ui.update_stats(self.fps, self.current_objects, self.current_faces)
+        self.ui.update_stats(self.fps, self.current_objects)
     
     def render_frame(self):
         """
@@ -115,7 +106,7 @@ class CVDetectionApp:
         self.screen.blit(frame_surface, (0, 0))
         
         # Рисуем UI поверх
-        self.ui.render(self.current_objects, self.current_faces, self.show_stats)
+        self.ui.render(self.current_objects, self.show_stats)
         
         # Если пауза - показываем индикатор
         if self.paused:
@@ -126,17 +117,18 @@ class CVDetectionApp:
     
     def _draw_pause_indicator(self):
         """Индикатор паузы"""
-        pause_text = self.ui.font_large.render("⏸ PAUSED", True, (255, 255, 0))
-        text_rect = pause_text.get_rect(center=(self.window_size[0] // 2, 100))
+        pause_bg = pygame.Surface((300, 100), pygame.SRCALPHA)
+        pygame.draw.rect(pause_bg, (15, 15, 25, 220), (0, 0, 300, 100), border_radius=15)
+        pygame.draw.rect(pause_bg, (80, 80, 100), (0, 0, 300, 100), 2, border_radius=15)
         
-        # Фон
-        bg_rect = pygame.Rect(text_rect.x - 20, text_rect.y - 10, 
-                             text_rect.width + 40, text_rect.height + 20)
-        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-        bg_surface.fill((0, 0, 0, 180))
-        self.screen.blit(bg_surface, bg_rect.topleft)
+        pause_x = (self.window_size[0] - 300) // 2
+        pause_y = 100
+        
+        self.screen.blit(pause_bg, (pause_x, pause_y))
         
         # Текст
+        pause_text = self.ui.font_large.render("⏸ PAUSED", True, (255, 255, 0))
+        text_rect = pause_text.get_rect(center=(self.window_size[0] // 2, pause_y + 50))
         self.screen.blit(pause_text, text_rect)
     
     def handle_events(self):

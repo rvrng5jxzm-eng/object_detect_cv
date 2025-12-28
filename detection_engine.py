@@ -1,11 +1,10 @@
 """
-Detection Engine - YOLO + Face Analysis
+Detection Engine - YOLO + Custom Detection
 """
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from deepface import DeepFace
-from typing import List, Dict, Tuple, Optional
+from typing import List, Tuple
 from config import Config
 
 
@@ -16,22 +15,31 @@ class DetectionResult:
         self.bbox = bbox  # (x1, y1, x2, y2)
         self.class_name = class_name
         self.confidence = confidence
-
-
-class FaceAnalysisResult:
-    """Результат анализа лица"""
-    def __init__(self, bbox: Tuple[int, int, int, int], age: int):
-        self.bbox = bbox
-        self.age = age
+        self.category = self._get_category()
+    
+    def _get_category(self) -> str:
+        """Определяем категорию объекта для цветовой кодировки"""
+        electronics = ["laptop", "cell phone", "keyboard", "mouse", 
+                      "tv", "remote", "camera", "headphones (detected)", 
+                      "charger (detected)"]
+        transport = ["bicycle", "motorcycle", "car", "bus", "train"]
+        accessories = ["backpack", "handbag", "suitcase", "umbrella", "tie"]
         
-        # Детекция аксессуаров (будет добавлено позже если нужно)
-        self.has_glasses = False
-        self.has_mask = False
+        if self.class_name == "person":
+            return "person"
+        elif any(e in self.class_name for e in electronics):
+            return "electronics"
+        elif any(t in self.class_name for t in transport):
+            return "transport"
+        elif any(a in self.class_name for a in accessories):
+            return "accessories"
+        else:
+            return "other"
 
 
 class DetectionEngine:
     """
-    Движок детекции - YOLO для объектов + DeepFace для лиц
+    Движок детекции - YOLO + Custom Detection
     """
     
     def __init__(self):
@@ -41,23 +49,30 @@ class DetectionEngine:
         print(f"[DetectionEngine] Загрузка YOLO ({Config.detection.yolo_model})...")
         self.yolo = YOLO(Config.detection.yolo_model)
         
-        # DeepFace настройки
-        self.face_backend = Config.detection.face_detection_backend
+        # Греем модель
+        print("[DetectionEngine] Прогрев модели...")
+        dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+        _ = self.yolo(dummy_frame, verbose=False)
         
-        # Кэш для face analysis (чтобы не анализировать каждый кадр)
-        self.face_analysis_cache = {}
-        self.face_cache_frames = 15  # Обновляем раз в 15 кадров (реже = быстрее)
-        self.current_frame = 0
+        # Custom detector для специфичных объектов
+        try:
+            from custom_detector import CustomObjectDetector
+            self.custom_detector = CustomObjectDetector()
+            self.use_custom_detection = True
+        except ImportError:
+            print("[DetectionEngine] Custom detector не найден, используем только YOLO")
+            self.use_custom_detection = False
         
         print("[DetectionEngine] ✅ Готов к работе")
     
     def detect_objects(self, frame: np.ndarray) -> List[DetectionResult]:
         """
-        Детекция объектов через YOLO
+        Детекция объектов через YOLO + Custom Detection
         """
-        results = self.yolo(frame, verbose=False)[0]
-        
         detections = []
+        
+        # 1. YOLO inference
+        results = self.yolo(frame, verbose=False, conf=Config.detection.yolo_confidence)[0]
         
         for box in results.boxes:
             # Извлекаем данные
@@ -65,10 +80,6 @@ class DetectionEngine:
             confidence = float(box.conf[0].cpu().numpy())
             class_id = int(box.cls[0].cpu().numpy())
             class_name = results.names[class_id]
-            
-            # Фильтруем по confidence
-            if confidence < Config.detection.yolo_confidence:
-                continue
             
             # Фильтруем по классам
             if Config.detection.object_classes_filter:
@@ -81,65 +92,14 @@ class DetectionEngine:
                 confidence=confidence
             ))
         
+        # 2. Custom Detection (наушники, зарядники и т.д.)
+        if self.use_custom_detection:
+            # Детекция наушников
+            headphones = self.custom_detector.detect_headphones(frame)
+            detections.extend(headphones)
+            
+            # Детекция зарядников
+            chargers = self.custom_detector.detect_charger(frame)
+            detections.extend(chargers)
+        
         return detections
-    
-    def analyze_faces(self, frame: np.ndarray) -> List[FaceAnalysisResult]:
-        """
-        Анализ лиц через DeepFace (ТОЛЬКО ВОЗРАСТ)
-        """
-        self.current_frame += 1
-        
-        # Используем кэш для производительности
-        if self.current_frame % self.face_cache_frames != 0:
-            return list(self.face_analysis_cache.values())
-        
-        try:
-            # DeepFace анализ
-            analysis = DeepFace.analyze(
-                frame,
-                actions=Config.detection.face_analysis_actions,  # Только ['age']
-                detector_backend=self.face_backend,
-                enforce_detection=False,
-                silent=True
-            )
-            
-            # DeepFace может вернуть list или dict
-            if not isinstance(analysis, list):
-                analysis = [analysis]
-            
-            # Обновляем кэш
-            self.face_analysis_cache.clear()
-            
-            results = []
-            for idx, face in enumerate(analysis):
-                # Извлекаем bbox
-                region = face.get('region', {})
-                x, y, w, h = region.get('x', 0), region.get('y', 0), \
-                            region.get('w', 100), region.get('h', 100)
-                
-                # Извлекаем только возраст
-                age = face.get('age', 0)
-                
-                result = FaceAnalysisResult(
-                    bbox=(x, y, x + w, y + h),
-                    age=int(age)
-                )
-                
-                results.append(result)
-                self.face_analysis_cache[idx] = result
-            
-            return results
-            
-        except Exception as e:
-            # Если лиц нет или ошибка - возвращаем пустой список
-            return []
-    
-    def process_frame(self, frame: np.ndarray) -> Tuple[List[DetectionResult], List[FaceAnalysisResult]]:
-        """
-        Обрабатываем кадр: детекция объектов + анализ лиц
-        Returns: (objects, faces)
-        """
-        objects = self.detect_objects(frame)
-        faces = self.analyze_faces(frame)
-        
-        return objects, faces

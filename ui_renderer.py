@@ -1,11 +1,29 @@
 """
-UI Renderer - красивый интерфейс поверх видео
+UI Renderer - КРАСИВЫЙ БЕЛЫЙ ДИЗАЙН для видео
 """
 import pygame
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Tuple  # ДОБАВИЛИ Tuple
 from config import Config
-from detection_engine import DetectionResult, FaceAnalysisResult
+from detection_engine import DetectionResult
+import time
+
+
+class AnimatedValue:
+    """Плавная анимация для числовых значений"""
+    def __init__(self, initial_value: float = 0.0):
+        self.current = initial_value
+        self.target = initial_value
+    
+    def set_target(self, value: float):
+        self.target = value
+    
+    def update(self):
+        # Плавное приближение к целевому значению
+        self.current += (self.target - self.current) * Config.ui.animation_speed
+    
+    def get(self) -> float:
+        return self.current
 
 
 class UIRenderer:
@@ -19,28 +37,44 @@ class UIRenderer:
         self.height = Config.window.height
         
         # Шрифты
+        pygame.font.init()
+        self.font_title = pygame.font.Font(None, Config.ui.font_size_title)
         self.font_large = pygame.font.Font(None, Config.ui.font_size_large)
         self.font_medium = pygame.font.Font(None, Config.ui.font_size_medium)
         self.font_small = pygame.font.Font(None, Config.ui.font_size_small)
         
-        # Статистика
+        # Статистика с анимацией
         self.stats = {
-            'fps': 0,
-            'objects_detected': 0,
-            'faces_detected': 0,
+            'fps': AnimatedValue(0),
+            'objects_detected': AnimatedValue(0),
             'object_counts': {}
         }
         
+        # Для плавных переходов панелей
+        self.panel_alpha = AnimatedValue(0)
+        self.show_time = time.time()
+        
         print("[UIRenderer] ✅ Инициализация завершена")
     
+    def _get_category_color(self, category: str) -> Tuple[int, int, int]:
+        """Цвет bbox в зависимости от категории"""
+        color_map = {
+            'person': Config.ui.bbox_person_color,
+            'electronics': Config.ui.bbox_electronics_color,
+            'transport': Config.ui.bbox_transport_color,
+            'accessories': Config.ui.bbox_accessories_color,
+            'other': Config.ui.bbox_other_color
+        }
+        return color_map.get(category, Config.ui.bbox_other_color)
+    
     def draw_bbox(self, surface: pygame.Surface, bbox: tuple, 
-                  color: tuple, label: str, confidence: float = None):
+                  color: tuple, label: str, confidence: float):
         """
-        Рисуем bounding box с лейблом
+        Рисуем КРАСИВЫЙ bounding box с градиентом и тенью
         """
         x1, y1, x2, y2 = bbox
         
-        # Масштабируем координаты из камеры (720p) в окно (1080p)
+        # Масштабируем координаты
         scale_x = self.width / Config.camera.width
         scale_y = self.height / Config.camera.height
         
@@ -49,199 +83,219 @@ class UIRenderer:
         x2 = int(x2 * scale_x)
         y2 = int(y2 * scale_y)
         
-        # Рисуем прямоугольник
-        pygame.draw.rect(surface, color, (x1, y1, x2 - x1, y2 - y1), 
-                        Config.ui.bbox_thickness)
+        width = x2 - x1
+        height = y2 - y1
         
-        # Лейбл с confidence
-        if confidence is not None:
-            label_text = f"{label} {confidence:.2f}"
-        else:
-            label_text = label
+        # Тень для глубины
+        shadow_offset = 4
+        shadow_rect = pygame.Rect(x1 + shadow_offset, y1 + shadow_offset, width, height)
+        shadow_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        shadow_surface.fill((0, 0, 0, 40))
+        surface.blit(shadow_surface, shadow_rect.topleft)
         
-        # Фон для текста
-        text_surface = self.font_small.render(label_text, True, (255, 255, 255))
+        # Главный bbox с углами
+        thickness = Config.ui.bbox_thickness
+        corner_length = 20
+        
+        # Верхние углы
+        pygame.draw.line(surface, color, (x1, y1), (x1 + corner_length, y1), thickness)
+        pygame.draw.line(surface, color, (x1, y1), (x1, y1 + corner_length), thickness)
+        pygame.draw.line(surface, color, (x2, y1), (x2 - corner_length, y1), thickness)
+        pygame.draw.line(surface, color, (x2, y1), (x2, y1 + corner_length), thickness)
+        
+        # Нижние углы
+        pygame.draw.line(surface, color, (x1, y2), (x1 + corner_length, y2), thickness)
+        pygame.draw.line(surface, color, (x1, y2), (x1, y2 - corner_length), thickness)
+        pygame.draw.line(surface, color, (x2, y2), (x2 - corner_length, y2), thickness)
+        pygame.draw.line(surface, color, (x2, y2), (x2, y2 - corner_length), thickness)
+        
+        # Лейбл с красивым фоном
+        label_text = f"{label.upper()} {confidence:.0%}"
+        text_surface = self.font_medium.render(label_text, True, (255, 255, 255))
         text_rect = text_surface.get_rect()
         
         # Позиция над bbox
-        text_bg_rect = pygame.Rect(x1, y1 - text_rect.height - 8, 
-                                   text_rect.width + 10, text_rect.height + 6)
+        label_padding = 10
+        label_bg_width = text_rect.width + label_padding * 2
+        label_bg_height = text_rect.height + label_padding
         
-        # Рисуем фон
-        bg_surface = pygame.Surface((text_bg_rect.width, text_bg_rect.height))
-        bg_surface.set_alpha(200)
-        bg_surface.fill(color)
-        surface.blit(bg_surface, text_bg_rect.topleft)
+        label_x = x1
+        label_y = y1 - label_bg_height - 5
         
-        # Рисуем текст
-        surface.blit(text_surface, (x1 + 5, y1 - text_rect.height - 5))
-    
-    def draw_face_info(self, surface: pygame.Surface, face: FaceAnalysisResult):
-        """
-        Рисуем информацию о лице (ТОЛЬКО ВОЗРАСТ)
-        """
-        x1, y1, x2, y2 = face.bbox
+        # Если выходит за верхнюю границу - рисуем внутри
+        if label_y < 0:
+            label_y = y1 + 5
         
-        # Масштабируем
-        scale_x = self.width / Config.camera.width
-        scale_y = self.height / Config.camera.height
+        # Фон лейбла с градиентом
+        label_bg = pygame.Surface((label_bg_width, label_bg_height), pygame.SRCALPHA)
         
-        x1 = int(x1 * scale_x)
-        y1 = int(y1 * scale_y)
-        x2 = int(x2 * scale_x)
-        y2 = int(y2 * scale_y)
+        # Градиент от цвета к полупрозрачному
+        for i in range(label_bg_height):
+            alpha = int(220 - (i / label_bg_height) * 50)
+            gradient_color = (*color, alpha)
+            pygame.draw.line(label_bg, gradient_color, 
+                           (0, i), (label_bg_width, i))
         
-        # Bbox для лица (зеленый)
-        pygame.draw.rect(surface, Config.ui.bbox_person_color, 
-                        (x1, y1, x2 - x1, y2 - y1), 
-                        Config.ui.bbox_thickness)
+        surface.blit(label_bg, (label_x, label_y))
         
-        # Информационная панель (справа от лица)
-        info_width = 150
-        info_height = 60
-        info_x = x2 + 10
-        info_y = y1
-        
-        # Если выходит за границы - рисуем слева
-        if info_x + info_width > self.width:
-            info_x = x1 - info_width - 10
-        
-        # Фон панели
-        info_bg = pygame.Surface((info_width, info_height), pygame.SRCALPHA)
-        info_bg.fill(Config.ui.face_info_bg)
-        surface.blit(info_bg, (info_x, info_y))
-        
-        # Текст - только возраст
-        y_offset = info_y + 15
-        
-        # Возраст
-        age_text = self.font_medium.render(f"Age: {face.age}", True, 
-                                        Config.ui.face_info_text_color)
-        surface.blit(age_text, (info_x + 10, y_offset))
-        
-        # Аксессуары (если будут добавлены позже)
-        if face.has_glasses:
-            y_offset += 30
-            glasses_text = self.font_small.render("👓 Glasses", True, (255, 255, 0))
-            surface.blit(glasses_text, (info_x + 10, y_offset))
+        # Текст лейбла
+        surface.blit(text_surface, (label_x + label_padding, label_y + label_padding // 2))
     
     def draw_objects(self, surface: pygame.Surface, objects: List[DetectionResult]):
         """
         Рисуем все обнаруженные объекты
         """
         for obj in objects:
-            # Цвет в зависимости от класса
-            if obj.class_name == "person":
-                color = Config.ui.bbox_person_color
-            else:
-                color = Config.ui.bbox_object_color
-            
-            # Рисуем bbox
-            self.draw_bbox(surface, obj.bbox, color, 
-                          obj.class_name, obj.confidence)
-    
-    def draw_faces(self, surface: pygame.Surface, faces: List[FaceAnalysisResult]):
-        """
-        Рисуем всю информацию о лицах
-        """
-        for face in faces:
-            self.draw_face_info(surface, face)
+            color = self._get_category_color(obj.category)
+            self.draw_bbox(surface, obj.bbox, color, obj.class_name, obj.confidence)
     
     def draw_stats_panel(self, surface: pygame.Surface):
         """
-        Рисуем панель статистики (верхний правый угол)
+        КРАСИВАЯ панель статистики (правый верхний угол)
         """
-        panel_x = self.width - Config.ui.stats_panel_width - 20
-        panel_y = 20
+        panel_x = self.width - Config.ui.stats_panel_width - 30
+        panel_y = 30
+        panel_w = Config.ui.stats_panel_width
+        panel_h = Config.ui.stats_panel_height
         
-        # Фон панели
-        panel_bg = pygame.Surface((Config.ui.stats_panel_width, 
-                                   Config.ui.stats_panel_height), 
-                                 pygame.SRCALPHA)
-        panel_bg.fill(Config.ui.stats_bg)
-        surface.blit(panel_bg, (panel_x, panel_y))
+        # Фон с закругленными углами
+        panel_surface = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        pygame.draw.rect(panel_surface, Config.ui.panel_bg, 
+                        (0, 0, panel_w, panel_h), border_radius=15)
+        
+        # Граница
+        pygame.draw.rect(panel_surface, Config.ui.panel_border_color, 
+                        (0, 0, panel_w, panel_h), 2, border_radius=15)
+        
+        surface.blit(panel_surface, (panel_x, panel_y))
+        
+        # Контент панели
+        y_offset = panel_y + 25
+        x_padding = panel_x + 25
         
         # Заголовок
-        y_offset = panel_y + 15
-        title = self.font_large.render("Statistics", True, (0, 255, 255))
-        surface.blit(title, (panel_x + 15, y_offset))
-        y_offset += 40
+        title = self.font_large.render("STATISTICS", True, Config.ui.text_accent)
+        surface.blit(title, (x_padding, y_offset))
+        y_offset += 50
         
-        # Линия
-        pygame.draw.line(surface, (100, 100, 100), 
-                        (panel_x + 15, y_offset), 
-                        (panel_x + Config.ui.stats_panel_width - 15, y_offset), 2)
-        y_offset += 15
+        # Линия разделитель
+        pygame.draw.line(surface, Config.ui.panel_border_color,
+                        (x_padding, y_offset), 
+                        (panel_x + panel_w - 25, y_offset), 2)
+        y_offset += 20
         
-        # FPS
-        fps_text = self.font_medium.render(f"FPS: {self.stats['fps']}", True, 
-                                          Config.ui.stats_text_color)
-        surface.blit(fps_text, (panel_x + 15, y_offset))
-        y_offset += 30
+        # FPS с иконкой
+        fps_value = int(self.stats['fps'].get())
+        fps_color = Config.ui.accent_color if fps_value >= 30 else Config.ui.warning_color
+        fps_text = self.font_medium.render(f"FPS:", True, Config.ui.text_secondary)
+        fps_value_text = self.font_large.render(f"{fps_value}", True, fps_color)
         
-        # Faces detected
-        faces_text = self.font_medium.render(
-            f"Faces: {self.stats['faces_detected']}", True, 
-            (0, 255, 0))
-        surface.blit(faces_text, (panel_x + 15, y_offset))
-        y_offset += 30
+        surface.blit(fps_text, (x_padding, y_offset))
+        surface.blit(fps_value_text, (x_padding + 100, y_offset - 5))
+        y_offset += 50
         
         # Objects detected
-        objects_text = self.font_medium.render(
-            f"Objects: {self.stats['objects_detected']}", True, 
-            (255, 165, 0))
-        surface.blit(objects_text, (panel_x + 15, y_offset))
-        y_offset += 40
+        objects_count = int(self.stats['objects_detected'].get())
+        obj_text = self.font_medium.render(f"Detected:", True, Config.ui.text_secondary)
+        obj_value = self.font_large.render(f"{objects_count}", True, Config.ui.secondary_accent)
         
-        # Object counts (детальная статистика)
+        surface.blit(obj_text, (x_padding, y_offset))
+        surface.blit(obj_value, (x_padding + 100, y_offset - 5))
+        y_offset += 60
+        
+        # Breakdown по категориям
         if self.stats['object_counts']:
-            counts_title = self.font_small.render("Detected:", True, (200, 200, 200))
-            surface.blit(counts_title, (panel_x + 15, y_offset))
-            y_offset += 25
+            breakdown_title = self.font_small.render("BREAKDOWN:", True, Config.ui.text_secondary)
+            surface.blit(breakdown_title, (x_padding, y_offset))
+            y_offset += 30
             
-            for obj_class, count in sorted(self.stats['object_counts'].items()):
-                count_text = self.font_small.render(f"  {obj_class}: {count}", 
-                                                    True, (180, 180, 180))
-                surface.blit(count_text, (panel_x + 20, y_offset))
-                y_offset += 22
+            # Сортируем по количеству
+            sorted_counts = sorted(self.stats['object_counts'].items(), 
+                                  key=lambda x: x[1], reverse=True)
+            
+            for obj_class, count in sorted_counts[:6]:  # Топ 6
+                # Прогресс бар
+                max_count = max(self.stats['object_counts'].values())
+                bar_width = int((count / max_count) * 200)
+                
+                # Фон бара
+                pygame.draw.rect(surface, (40, 40, 50, 150),
+                               (x_padding, y_offset, 200, 20), border_radius=3)
+                
+                # Заполненная часть
+                category_color = self._get_category_color(
+                    DetectionResult((0,0,0,0), obj_class, 0).category
+                )
+                pygame.draw.rect(surface, (*category_color, 180),
+                               (x_padding, y_offset, bar_width, 20), border_radius=3)
+                
+                # Текст
+                count_text = self.font_small.render(f"{obj_class}: {count}", 
+                                                    True, Config.ui.text_primary)
+                surface.blit(count_text, (x_padding + 210, y_offset))
+                
+                y_offset += 28
     
     def draw_header(self, surface: pygame.Surface):
         """
-        Рисуем заголовок приложения (верхний левый угол)
+        Минималистичный заголовок (левый верхний угол)
         """
-        header_bg = pygame.Surface((600, 60), pygame.SRCALPHA)
-        header_bg.fill((20, 20, 20, 200))
-        surface.blit(header_bg, (20, 20))
+        header_w = 650
+        header_h = 80
+        header_x = 30
+        header_y = 30
         
-        # Текст заголовка
-        title = self.font_large.render("🎥 Real-time CV Detection", True, (0, 255, 0))
-        surface.blit(title, (30, 30))
+        # Фон
+        header_bg = pygame.Surface((header_w, header_h), pygame.SRCALPHA)
+        pygame.draw.rect(header_bg, Config.ui.panel_bg,
+                        (0, 0, header_w, header_h), border_radius=15)
+        pygame.draw.rect(header_bg, Config.ui.panel_border_color,
+                        (0, 0, header_w, header_h), 2, border_radius=15)
+        surface.blit(header_bg, (header_x, header_y))
+        
+        # Текст
+        title = self.font_title.render("OBJECT DETECTION", True, Config.ui.text_primary)
+        surface.blit(title, (header_x + 20, header_y + 20))
+        
+        # Подзаголовок
+        subtitle = self.font_small.render("Real-time AI Vision System", 
+                                         True, Config.ui.text_secondary)
+        surface.blit(subtitle, (header_x + 22, header_y + 50))
     
-    def draw_controls_hint(self, surface: pygame.Surface):
+    def draw_legend(self, surface: pygame.Surface):
         """
-        Подсказка по управлению (нижний левый угол)
+        Легенда категорий (нижний левый угол)
         """
-        hints = [
-            "SPACE - Pause",
-            "D - Toggle Stats",
-            "ESC - Exit"
+        legend_x = 30
+        legend_y = self.height - 200
+        
+        categories = [
+            ("Person", Config.ui.bbox_person_color),
+            ("Electronics", Config.ui.bbox_electronics_color),
+            ("Transport", Config.ui.bbox_transport_color),
+            ("Accessories", Config.ui.bbox_accessories_color),
+            ("Other", Config.ui.bbox_other_color)
         ]
         
-        y_offset = self.height - 120
-        
-        for hint in hints:
-            hint_text = self.font_small.render(hint, True, (150, 150, 150))
-            surface.blit(hint_text, (20, y_offset))
-            y_offset += 25
+        for i, (name, color) in enumerate(categories):
+            y_pos = legend_y + i * 35
+            
+            # Цветной квадрат
+            pygame.draw.rect(surface, color, (legend_x, y_pos, 25, 25), border_radius=5)
+            pygame.draw.rect(surface, (255, 255, 255, 100), 
+                           (legend_x, y_pos, 25, 25), 2, border_radius=5)
+            
+            # Текст
+            text = self.font_small.render(name, True, Config.ui.text_primary)
+            surface.blit(text, (legend_x + 35, y_pos + 3))
     
-    def update_stats(self, fps: int, objects: List[DetectionResult], 
-                    faces: List[FaceAnalysisResult]):
+    def update_stats(self, fps: int, objects: List[DetectionResult]):
         """
-        Обновляем статистику для отображения
+        Обновляем статистику с плавными анимациями
         """
-        self.stats['fps'] = fps
-        self.stats['faces_detected'] = len(faces)
-        self.stats['objects_detected'] = len(objects)
+        # Обновляем целевые значения
+        self.stats['fps'].set_target(fps)
+        self.stats['objects_detected'].set_target(len(objects))
         
         # Подсчитываем объекты по классам
         object_counts = {}
@@ -252,17 +306,17 @@ class UIRenderer:
                 object_counts[obj.class_name] = 1
         
         self.stats['object_counts'] = object_counts
+        
+        # Обновляем анимации
+        self.stats['fps'].update()
+        self.stats['objects_detected'].update()
     
-    def render(self, objects: List[DetectionResult], 
-               faces: List[FaceAnalysisResult], show_stats: bool = True):
+    def render(self, objects: List[DetectionResult], show_stats: bool = True):
         """
-        Главный метод рендеринга - рисуем всё
+        Главный метод рендеринга
         """
         # Объекты
         self.draw_objects(self.screen, objects)
-        
-        # Лица
-        self.draw_faces(self.screen, faces)
         
         # UI элементы
         self.draw_header(self.screen)
@@ -270,18 +324,4 @@ class UIRenderer:
         if show_stats:
             self.draw_stats_panel(self.screen)
         
-        self.draw_controls_hint(self.screen)
-    
-    @staticmethod
-    def _get_emotion_emoji(emotion: str) -> str:
-        """Возвращаем эмодзи для эмоции"""
-        emotion_map = {
-            'happy': '😊',
-            'sad': '😢',
-            'angry': '😠',
-            'surprise': '😲',
-            'fear': '😨',
-            'disgust': '🤢',
-            'neutral': '😐'
-        }
-        return emotion_map.get(emotion.lower(), '😐')
+        self.draw_legend(self.screen)
