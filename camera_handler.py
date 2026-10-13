@@ -3,7 +3,7 @@ Camera Handler - работа с видеопотоком
 Адаптировано из hand_tracking.py
 """
 import cv2
-import numpy as np
+import  as np
 from config import Config
 
 
